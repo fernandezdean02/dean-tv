@@ -1,0 +1,13 @@
+[package]
+name = "fernandezdean02/dean-tv"
+version = "0.1.0"
+
+[[module]]
+name = "dean-tv"
+source = "server.py"
+
+[[module.commands]]
+name = "start"
+runner = "python"
+# You may need to pass the script as an argument
+# args = ["server.py"]
