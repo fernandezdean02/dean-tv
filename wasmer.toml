@@ -1,14 +1,13 @@
 [package]
 name = "fernandezdean02/dean-tv"
 version = "0.1.0"
-description = "Dean TV streaming proxy"
 
 [[module]]
 name = "dean-tv"
-source = "server.py"
+source = "app.py"
 
 [[module.commands]]
 name = "start"
 runner = "python"
-# Explicitly pass server.py as the script to run
-args = ["server.py"]
+# Uvicorn is the recommended ASGI server for FastAPI
+args = ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
