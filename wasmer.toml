@@ -1,6 +1,7 @@
 [package]
 name = "fernandezdean02/dean-tv"
 version = "0.1.0"
+description = "Dean TV streaming proxy"
 
 [[module]]
 name = "dean-tv"
@@ -9,5 +10,5 @@ source = "server.py"
 [[module.commands]]
 name = "start"
 runner = "python"
-# You may need to pass the script as an argument
-# args = ["server.py"]
+# Explicitly pass server.py as the script to run
+args = ["server.py"]
