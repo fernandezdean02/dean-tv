@@ -1114,7 +1114,7 @@ const player = {
 };
 
 function proxied(realUrl, referer, cookie) {
-  let u = PROXY_URL + "/?url=" + encodeURIComponent(realUrl)
+  let u = PROXY_URL + "/proxy?url=" + encodeURIComponent(realUrl)
         + "&referer=" + encodeURIComponent(referer || BASE + "/");
   if (cookie) u += "&cookie=" + encodeURIComponent(cookie);
   return u;
