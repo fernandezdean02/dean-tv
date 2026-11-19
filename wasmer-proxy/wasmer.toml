@@ -1,0 +1,12 @@
+[package]
+name = "dean-tv-proxy"
+version = "0.1.0"
+
+[[module]]
+name = "proxy"
+source = "index.js"
+
+[[command]]
+name = "proxy"
+module = "proxy"
+runner = "https://registry.wasmer.io/edge/winterjs"
