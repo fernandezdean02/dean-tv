@@ -16,4 +16,4 @@ COPY . .
 ENV PORT=10000
 EXPOSE 10000
 
-CMD ["python", "server.py"]
+CMD ["python", "api.py"]
