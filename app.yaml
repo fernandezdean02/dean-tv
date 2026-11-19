@@ -1,0 +1,11 @@
+kind: wasmer.io/App.v0
+name: fernandezdean02/dean-tv
+package: .
+cli_args:
+  - -m
+  - uvicorn
+  - app:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8080"
