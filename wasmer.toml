@@ -1,14 +1,16 @@
 [package]
 name = "fernandezdean02/dean-tv"
 version = "0.1.0"
-description = "Dean TV streaming proxy"
-readme = "README.md"
 
 [dependencies]
 "wasmer/python" = "^3.12.6"
 
 [fs]
-"/app.py" = "./app.py"
+"/server.py" = "./api.py"
+"/index.html" = "./index.html"
+"/player.html" = "./player.html"
+"/detail.html" = "./detail.html"
+"/providers.json" = "./providers.json"
 "/cpython/lib/python3.12/site-packages" = "./.env/lib/python3.12/site-packages"
 
 [[command]]
@@ -17,9 +19,4 @@ module = "wasmer/python:python"
 runner = "wasi"
 
 [command.annotations.wasi]
-main-args = [
-    "-m", "uvicorn", "app:app",
-    "--host", "0.0.0.0",
-    "--port", "8080"
-]
-env = ["PYTHONEXECUTABLE=/bin/python"]
+main-args = ["-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
