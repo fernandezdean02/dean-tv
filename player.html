@@ -1704,7 +1704,9 @@ function normalizeStreams(data, pageReferer) {
     const rawUrl = typeof s === "string" ? s : pick(s, "url", "playUrl", "src", "file", "link") || "";
     if (!rawUrl || seen.has(rawUrl)) continue;
     seen.add(rawUrl);
-    const url = rawUrl.startsWith("http") ? proxied(rawUrl, cdnReferer, signCookie) : rawUrl;
+    const url = rawUrl.startsWith("http")
+  ? proxied(rawUrl, cdnReferer, signCookie) + "&direct=1"
+  : rawUrl;
     const rawQ = pick(s, "resolutions", "resolution", "quality", "definition", "resName", "label", "name") || "";
     let quality = "Auto";
     if (rawQ) {
