@@ -619,76 +619,33 @@
     .drawer-body { padding:14px 16px 22px; }
   }
 
-  /* ═══════════ upgraded player-feedback ═══════════ */
-  .player-feedback {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .fb-time {
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -.5px;
-  }
-  .fb-arrows {
-    display: inline-flex;
-    gap: 2px;
-    align-items: center;
-    color: var(--accent);
-  }
+  .player-feedback { display: flex; align-items: center; gap: 12px; }
+  .fb-time { font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+  .fb-arrows { display: inline-flex; gap: 2px; align-items: center; color: var(--accent); }
   .fb-arrows[hidden] { display: none; }
-  .fb-arrows > span {
-    font-size: 22px;
-    font-weight: 900;
-    line-height: 1;
-    display: inline-block;
-    opacity: 0.25;
-    transform: scale(0.85);
-    animation: fbArrowPulse 1.1s infinite ease-in-out;
-  }
+  .fb-arrows > span { font-size: 22px; font-weight: 900; line-height: 1; display: inline-block; opacity: 0.25; transform: scale(0.85); animation: fbArrowPulse 1.1s infinite ease-in-out; }
   .fb-arrows > span:nth-child(1) { animation-delay: 0s;    }
   .fb-arrows > span:nth-child(2) { animation-delay: .18s;  }
   .fb-arrows > span:nth-child(3) { animation-delay: .36s;  }
-  @keyframes fbArrowPulse {
-    0%, 100% { opacity: 0.25; transform: scale(0.85); }
-    50%      { opacity: 1;    transform: scale(1.05); }
-  }
+  @keyframes fbArrowPulse { 0%, 100% { opacity: 0.25; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.05); } }
 
-  /* ═══════════ frame-seek-btn icon spin ═══════════ */
-  .frame-seek-btn svg {
-    transform-origin: 50% 50%;
-    will-change: transform;
-  }
+  .frame-seek-btn svg { transform-origin: 50% 50%; will-change: transform; }
   .frame-seek-btn.spin-fwd svg { animation: iconSpinFwd .55s cubic-bezier(.34,1.56,.64,1); }
   .frame-seek-btn.spin-rew svg { animation: iconSpinRew .55s cubic-bezier(.34,1.56,.64,1); }
-  @keyframes iconSpinFwd {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(-360deg); }
-  }
-  @keyframes iconSpinRew {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-  }
+  @keyframes iconSpinFwd { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+  @keyframes iconSpinRew { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-  /* ═══════════ premium mode: no hover / active feedback ═══════════ */
-  .player-bigplay:hover,
-  .player-bigplay:active { background:rgba(0,0,0,.5); border-color:rgba(255,255,255,.7); transform:none; }
-
+  .player-bigplay:hover, .player-bigplay:active { background:rgba(0,0,0,.5); border-color:rgba(255,255,255,.7); transform:none; }
   .frame-nav-btn:hover { background:rgba(0,0,0,.55); border-color:rgba(255,255,255,.35); }
   .frame-nav-btn:active { transform:translateY(-50%); }
-
   .frame-seek-btn:hover { background:rgba(0,0,0,.5); border-color:rgba(255,255,255,.5); }
   .frame-seek-btn:active { transform:none; }
-
-  .icon-btn:hover,
-  .icon-btn:active { background:rgba(255,255,255,.08); transform:none; }
-
+  .icon-btn:hover, .icon-btn:active { background:rgba(255,255,255,.08); transform:none; }
   .menu-btn:hover { background:rgba(255,255,255,.08); }
   .menu-list button:hover { background:transparent; }
   .menu-list button.active:hover { background:var(--accent); }
-
   .btn:hover { background:var(--card-2); border-color:var(--line); }
   .btn-primary:hover { background:var(--accent); border-color:var(--accent); }
-
   .drawer-close:hover { background:rgba(255,255,255,.06); }
   .drawer-ep-nav-btn:hover:not(:disabled) { background:#1e1e25; border-color:#2a2a33; }
   .drawer-ep-btn:hover { background:#1e1e25; border-color:#2a2a33; }
@@ -703,33 +660,17 @@
   .player-feedback.fb-reverse .fb-arrows { order: 1; }
   .player-feedback.fb-reverse .fb-time   { order: 2; }
 
-  .player video {
-    transform: translateZ(0);
-    -webkit-transform: translateZ(0);
-    will-change: transform;
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
-  }
+  .player video { transform: translateZ(0); -webkit-transform: translateZ(0); will-change: transform; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
 
-  .seek-mask {
-  position:absolute; inset:0;
-  background:#000;
-  z-index:2;
-  pointer-events:none;
-  opacity:0;
-  transition: opacity .12s ease;
-}
-.seek-mask.show {
-  opacity:1;
-  transition: none;
-}
+  .seek-mask { position:absolute; inset:0; background:#000; z-index:2; pointer-events:none; opacity:0; transition: opacity .12s ease; }
+  .seek-mask.show { opacity:1; transition: none; }
 </style>
 </head>
 <body>
 
 <div class="player" id="playerRoot">
   <div class="player-stage" id="playerStage">
-    <!-- 🔴 CORS FIX: crossorigin="anonymous" removed. See DEVLOG hint if you see code=4. -->
+    <!-- CORS-safe: no crossorigin attribute. Media goes through /proxy (httpx path) which sets the Referer the CDN requires. -->
     <video id="video" playsinline preload="metadata"></video>
     <div class="seek-mask" id="seekMask"></div>
 
@@ -978,9 +919,8 @@
 
 <script>
 /* ═══════════════════════════════════════════════════════════════
-   🟢 DEV LOG — floating diagnostic panel
-   Tap the 🐞 button bottom-right; errors auto-open the panel.
-   Add ?debug=1 to the URL to auto-open on load.
+   DEV LOG — floating diagnostic panel
+   Tap 🐞 bottom-right. Add ?debug=1 to auto-open on load.
    ═══════════════════════════════════════════════════════════════ */
 const DEVLOG = (() => {
   const MAX = 500;
@@ -1134,7 +1074,6 @@ const DEVLOG = (() => {
   return { log, warn, error, show, hide, toggle, clear, copy };
 })();
 
-// Auto-open on ?debug=1
 if (new URLSearchParams(location.search).get("debug") === "1") DEVLOG.show();
 
 /* ═══════════ CONFIG ═══════════ */
@@ -1863,8 +1802,10 @@ function normalizeStreams(data, pageReferer) {
     const rawUrl = typeof s === "string" ? s : pick(s, "url", "playUrl", "src", "file", "link") || "";
     if (!rawUrl || seen.has(rawUrl)) continue;
     seen.add(rawUrl);
+    // ═══ FIX: NO &direct=1 by default. httpx path carries the correct Referer.
+    //     attachNative() will retry with direct=1 if httpx fails. ═══
     const url = rawUrl.startsWith("http")
-      ? proxied(rawUrl, cdnReferer, signCookie) + "&direct=1"
+      ? proxied(rawUrl, cdnReferer, signCookie)
       : rawUrl;
     const rawQ = pick(s, "resolutions", "resolution", "quality", "definition", "resName", "label", "name") || "";
     let quality = "Auto";
@@ -1998,7 +1939,20 @@ async function tryStream(stream, idx) {
   }
 }
 
+/* ═══════════ ATTACH NATIVE — httpx-first, direct=1 fallback ═══════════ */
 function attachNative(url) {
+  return attachNativeOnce(url).catch((err) => {
+    // httpx path failed → retry with the browser 302 (direct=1).
+    if (!/[?&]direct=1(&|$)/.test(url)) {
+      const fallback = url + (url.includes("?") ? "&" : "?") + "direct=1";
+      DEVLOG.warn("httpx path failed (" + err.message + "), retrying with direct=1");
+      return attachNativeOnce(fallback);
+    }
+    throw err;
+  });
+}
+
+function attachNativeOnce(url) {
   return new Promise((resolve, reject) => {
     const onReady = () => {
       clearTimeout(player.attemptTimer);
@@ -2019,14 +1973,14 @@ function attachNative(url) {
       video.removeEventListener("error", onErr);
       const code = video.error?.code;
       const map = { 1: "ABORTED", 2: "NETWORK", 3: "DECODE", 4: "SRC_NOT_SUPPORTED" };
-      DEVLOG.error("attachNative error", "code=" + code + " (" + (map[code] || "?") + ")",
+      DEVLOG.error("attachNativeOnce error", "code=" + code + " (" + (map[code] || "?") + ")",
         "msg=" + ((video.error && video.error.message) || "(empty)"),
         "src=" + (video.currentSrc || video.src || "").slice(0, 240));
       reject(new Error(code === 4 ? "source not supported" : "video error " + code));
     };
     video.addEventListener("canplay", onReady);
     video.addEventListener("error", onErr);
-    DEVLOG.log("attachNative →", url.slice(0, 260));
+    DEVLOG.log("attachNativeOnce →", url.slice(0, 260));
     video.src = url;
     video.load();
   });
@@ -2186,7 +2140,7 @@ video.addEventListener("error", () => {
     if (video.getAttribute("crossorigin")) {
       DEVLOG.warn("HINT: <video crossorigin> is set and src is a /proxy redirect. The CDN likely lacks CORS. Remove crossorigin to fix.");
     } else {
-      DEVLOG.warn("HINT: code=" + code + " on /proxy URL. Likely CDN 403 (Referer/signature rejected) or wrong MIME.");
+      DEVLOG.warn("HINT: code=" + code + " on /proxy URL. Likely CDN 403/429 (Referer/signature rejected), wrong MIME, or httpx TLS rejected.");
     }
   }
   if (!playerLoading.hidden && !player.busy) {
@@ -2626,7 +2580,6 @@ seekEl.addEventListener("pointerdown", (e) => {
 });
 seekEl.addEventListener("pointermove", (e) => {
   if (!scrubbing) {
-    // Update tooltip on hover
     const rect = seekEl.getBoundingClientRect();
     const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const t = frac * (video.duration || 0);
@@ -2718,63 +2671,21 @@ document.addEventListener("click", (e) => {
 
 /* ═══════════ CAPTIONS ═══════════ */
 function loadCaptionsForCurrentStream() {
-  // Reset
   player.captions = [];
   player.captionIndex = -1;
   player.captionVttText = null;
   removeCaptionTrack();
-
-  // MovieBox doesn't reliably expose subtitle URLs in the play response.
-  // If your play JSON contains a `subtitles` array, wire it up here.
-  const data = player.streams[player.currentIdx];
-  if (!data || !data.subtitles || !data.subtitles.length) {
-    capWrap.hidden = true;
-    return;
-  }
-
-  // Stub — populate when you know the shape
-  player.captions = data.subtitles.map((s, i) => ({
-    name: s.lanName || s.lan || ("Track " + (i + 1)),
-    url: s.url || s.src || "",
-  })).filter(c => c.url);
-  if (!player.captions.length) { capWrap.hidden = true; return; }
-
-  capWrap.hidden = false;
-  capLabel.textContent = "CC";
-  capList.innerHTML = `<button type="button" data-ci="-1" class="active"><span>Off</span><span class="check">✓</span></button>` +
-    player.captions.map((c, i) =>
-      `<button type="button" data-ci="${i}"><span>${escapeHtml(c.name)}</span><span class="check">✓</span></button>`
-    ).join("");
-  capList.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.ci);
-      capList.hidden = true;
-      capBtn.classList.remove("open");
-      selectCaption(idx);
-    });
-  });
+  capWrap.hidden = true;
 }
 
-async function selectCaption(idx) {
-  player.captionIndex = idx;
-  capList.querySelectorAll("button").forEach((b, i) => {
-    b.classList.toggle("active", Number(b.dataset.ci) === idx);
-  });
-  if (idx < 0) {
-    removeCaptionTrack();
-    captionOverlay.hidden = true;
-    return;
+function removeCaptionTrack() {
+  if (player.captionTrackEl && player.captionTrackEl.parentNode) {
+    player.captionTrackEl.parentNode.removeChild(player.captionTrackEl);
   }
-  const cap = player.captions[idx];
-  if (!cap) return;
-  try {
-    const res = await fetch(proxied(cap.url, BASE + "/"));
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const text = await res.text();
-    player.captionVttText = text;
-    applyCaptionTrack(text, cap.name);
-  } catch (e) {
-    DEVLOG.warn("caption fetch failed:", e.message);
+  player.captionTrackEl = null;
+  if (player.captionBlobUrl) {
+    try { URL.revokeObjectURL(player.captionBlobUrl); } catch (_) {}
+    player.captionBlobUrl = null;
   }
 }
 
@@ -2791,7 +2702,6 @@ function applyCaptionTrack(vttText, name) {
     track.src = player.captionBlobUrl;
     video.appendChild(track);
     player.captionTrackEl = track;
-    // Enable the track
     setTimeout(() => {
       if (video.textTracks && video.textTracks.length) {
         for (let i = 0; i < video.textTracks.length; i++) {
@@ -2801,17 +2711,6 @@ function applyCaptionTrack(vttText, name) {
     }, 50);
   } catch (e) {
     DEVLOG.warn("applyCaptionTrack failed:", e.message);
-  }
-}
-
-function removeCaptionTrack() {
-  if (player.captionTrackEl && player.captionTrackEl.parentNode) {
-    player.captionTrackEl.parentNode.removeChild(player.captionTrackEl);
-  }
-  player.captionTrackEl = null;
-  if (player.captionBlobUrl) {
-    try { URL.revokeObjectURL(player.captionBlobUrl); } catch (_) {}
-    player.captionBlobUrl = null;
   }
 }
 
@@ -2933,7 +2832,6 @@ function renderDrawerContent() {
   }
   const parts = [];
 
-  // Episode navigation
   if (P.isSeries && player.seasons.length) {
     drawerEyebrow.textContent = "Browse";
     drawerTitle.textContent = player.detailTitle || "Episodes";
@@ -2959,7 +2857,6 @@ function renderDrawerContent() {
     </div>`);
   }
 
-  // Related
   if (player.detailRelated && player.detailRelated.length) {
     parts.push(`<div class="drawer-section">
       <div class="drawer-eyebrow">More like this</div>
@@ -2983,7 +2880,6 @@ function renderDrawerContent() {
   }
   drawerBody.innerHTML = parts.join("");
 
-  // Bind episode grid
   const season = player.seasons.find(s => Number(s.se) === Number(player.currentSe)) || player.seasons[0];
   if (season) {
     const grid = document.getElementById("drawerEpGrid");
@@ -3000,14 +2896,12 @@ function renderDrawerContent() {
     }
   }
 
-  // Bind drawer prev/next
   const { prev, next } = getPrevNextEp();
   const dPrev = document.getElementById("drawerPrev");
   const dNext = document.getElementById("drawerNext");
   if (dPrev) dPrev.addEventListener("click", () => { if (prev) navigateToEpisode(prev.se, prev.ep); });
   if (dNext) dNext.addEventListener("click", () => { if (next) navigateToEpisode(next.se, next.ep); });
 
-  // Bind season select
   const ss = document.getElementById("drawerSeasonSelect");
   if (ss) ss.addEventListener("change", (e) => {
     const se = Number(e.target.value);
@@ -3016,7 +2910,6 @@ function renderDrawerContent() {
     navigateToEpisode(se, ep);
   });
 
-  // Bind related
   drawerBody.querySelectorAll(".drawer-related-card").forEach(card => {
     card.addEventListener("click", () => {
       const dp = card.dataset.dp;
