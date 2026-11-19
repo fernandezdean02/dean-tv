@@ -998,12 +998,18 @@ const PROXY_URL = location.origin;
 const BASE = "https://officialmoviebox.com";
 const HLS_CDN = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js";
 
-const MAX_QUALITY = 720;   // hard cap to keep bandwidth under Railway trial limits
+const MAX_QUALITY = 720;
 const MAX_STREAM_ATTEMPTS = 8;
 const MAX_API_REFRESHES = 2;
 const ATTEMPT_TIMEOUT_MS = 15000;
 const TOTAL_TIMEOUT_MS = 60000;
 const IDLE_MS = 3000;
+
+/* ═══════════ DEBUG HELPER (module scope) ═══════════ */
+const DEBUG = QS.get("debug") === "1";
+function dbg(...a) {
+  if (DEBUG) console.log("[player]", ...a);
+}
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -1113,6 +1119,9 @@ const player = {
   },
 };
 
+let drawerOpen = false;
+let capSettingsOpen = false;
+
 function proxied(realUrl, referer, cookie) {
   let u = PROXY_URL + "/proxy?url=" + encodeURIComponent(realUrl)
         + "&referer=" + encodeURIComponent(referer || BASE + "/");
@@ -1145,7 +1154,6 @@ function showFeedback(text) {
   showFeedback._t = setTimeout(() => playerFeedback.classList.remove("show"), 700);
 }
 
-/* ─── Accumulating frame seeks + animated arrows + buffering chevrons ─── */
 const seekState = {
   fwd: { count: 0, timer: null },
   rew: { count: 0, timer: null },
@@ -1182,7 +1190,7 @@ function showSeekFeedback(direction, seconds) {
                      + "<span>" + chev + "</span>"
                      + "<span>" + chev + "</span>";
   fbArrows.hidden = !seekState.buffering;
-  playerFeedback.classList.toggle("fb-reverse", direction < 0);   /* ← NEW */
+  playerFeedback.classList.toggle("fb-reverse", direction < 0);
   playerFeedback.classList.add("show");
   clearTimeout(showFeedback._t);
   clearTimeout(seekState.hideTimer);
@@ -1250,7 +1258,7 @@ function setRetryStatus(text, cls) {
   retryStatusText.textContent = text;
 }
 
-/* ═══════════ QUALITY PICKER — default 480p ═══════════ */
+/* ═══════════ QUALITY PICKER ═══════════ */
 function pickStreamIndex(streams, preferredQuality) {
   if (!streams.length) return 0;
 
@@ -1612,7 +1620,7 @@ function resetPlayerForNewEpisode() {
   updatePrevNext();
 }
 
-/* ═══════════ STREAM FETCHING ═══════════ */
+/* ═══════════ STREAM FETCHING (FIXED: 30s timeout + dbg logging) ═══════════ */
 async function fetchStreams(signal) {
   const subjectId = P.subjectId;
   const detailPath = P.detailPath;
@@ -1631,14 +1639,48 @@ async function fetchStreams(signal) {
   const realPlayUrl = absolute(BASE, "/wefeed-h5api-bff/subject/play?" + playParams);
   const fetchUrl = proxied(realPlayUrl, referer);
 
-  const res = await fetch(fetchUrl, { signal });
+  dbg("fetchStreams URL:", realPlayUrl);
+  dbg("proxied URL:", fetchUrl);
+
+  // 30s hard timeout so a hanging proxy surfaces as an error, not "Loading…"
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  const t0 = Date.now();
+  let res;
+  try {
+    res = await fetch(fetchUrl, { signal: controller.signal });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") {
+      dbg("fetch() aborted after", Date.now() - t0, "ms");
+      throw new Error("Stream fetch timed out after 30s");
+    }
+    dbg("fetch() rejected:", e.name, e.message);
+    throw e;
+  }
+  clearTimeout(timeoutId);
+
+  dbg("HTTP response after", Date.now() - t0, "ms  status:", res.status);
+  dbg("content-type:", res.headers.get("content-type"));
+
   const body = await res.clone().text();
+  dbg("body length:", body.length);
+  dbg("body preview:", body.slice(0, 500));
+
   let json = null;
-  try { json = JSON.parse(body); } catch (_) {}
+  try { json = JSON.parse(body); } catch (e) { dbg("JSON parse failed:", e.message); }
 
   if (!res.ok) throw new Error("Play HTTP " + res.status);
-  if (!json) throw new Error("Play response not JSON");
+  if (!json) throw new Error("Play response not JSON. Body: " + body.slice(0, 200));
   if (json.code !== 0) throw new Error(json.message || "Play code " + json.code);
+
+  dbg("streams raw:", JSON.stringify(json.data).slice(0, 800));
 
   return normalizeStreams(json.data, referer);
 }
@@ -1685,14 +1727,11 @@ function normalizeStreams(data, pageReferer) {
     return bi - ai;
   });
 
-  // ── cap quality to MAX_QUALITY so the proxy never carries 1080p / 4K ──
   let capped = streams.filter(s => {
     const q = parseInt(s.quality, 10);
-    return isNaN(q) || q <= MAX_QUALITY;   // keep "Auto" and any unparsable label
+    return isNaN(q) || q <= MAX_QUALITY;
   });
 
-  // If every stream is above the cap, keep only the lowest-quality one
-  // (streams are sorted descending, so the last element is the smallest).
   if (capped.length === 0 && streams.length) {
     capped = [streams[streams.length - 1]];
   }
@@ -2420,38 +2459,41 @@ function applySeek(e, update) {
   if (update) video.currentTime = t;
 }
 
-/* ═══════════ QUALITY MENU ═══════════ */
+/* ═══════════ QUALITY MENU (RECONSTRUCTED) ═══════════ */
 function buildQualityMenu() {
   if (!player.streams.length) { qualityWrap.hidden = true; return; }
   qualityWrap.hidden = false;
-  qualityList.innerHTML = player.streams.map((s, i) =>
-    `<button type="button" data-q="${i}"${i === player.currentIdx ? ' class="active"' : ''}><span>${escapeHtml(s.quality)}</span><span class="check">✓</span></button>`
-  ).join("");
+  qualityList.innerHTML = player.streams.map((s, i) => {
+    const label = s.quality && s.quality !== "Auto" ? s.quality + "p" : "Auto";
+    return `<button type="button" data-q="${i}"${i === player.currentIdx ? ' class="active"' : ''}><span>${escapeHtml(label)}</span><span class="check">✓</span></button>`;
+  }).join("");
   qualityList.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
       const idx = Number(btn.dataset.q);
       qualityList.hidden = true;
       qualityBtn.classList.remove("open");
-
-      const q = parseInt(player.streams[idx].quality, 10);
-      player.preferredQuality = isNaN(q) ? null : q;
-
-      player.currentIdx = idx;
-      player.triedUrls.clear();
-      player.apiRefreshes = 0;
-      player.attemptCount = 0;
-
-      player.audio.pendingSeek = video.currentTime || 0;
-      player.audio.pendingPlay = !video.paused;
-
-      playerLoading.hidden = false;
-      playerError.hidden = true;
-      startPlayback({ isRetry: true });
+      if (idx === player.currentIdx) return;
+      player.preferredQuality = parseInt(player.streams[idx].quality, 10) || null;
+      switchStream(idx);
     });
   });
   const cur = player.streams[player.currentIdx];
-  qualityLabel.textContent = cur?.quality || "Auto";
+  qualityLabel.textContent = cur && cur.quality !== "Auto" ? cur.quality + "p" : "Auto";
 }
+
+function switchStream(idx) {
+  const stream = player.streams[idx];
+  if (!stream) return;
+  const savedTime = video.currentTime || 0;
+  const wasPlaying = !video.paused;
+  player.currentIdx = idx;
+  player.audio.pendingSeek = savedTime;
+  player.audio.pendingPlay = wasPlaying;
+  player.triedUrls.delete(stream.url);
+  tryStream(stream, idx);
+}
+
 qualityBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   qualityList.hidden = !qualityList.hidden;
@@ -2465,176 +2507,125 @@ document.addEventListener("click", (e) => {
   }
 });
 
-/* ═══════════ CAPTIONS ═══════════ */
-async function loadCaptionsForCurrentStream() {
-  const stream = player.streams[player.currentIdx];
-  if (!stream || !stream.id || !stream.format) { capWrap.hidden = true; return; }
-  try {
-    const params = new URLSearchParams({
-      format: stream.format, id: stream.id,
-      subjectId: P.subjectId, detailPath: P.detailPath,
-    });
-    const url = absolute(BASE, "/wefeed-h5api-bff/subject/caption?" + params);
-    const referer = absolute(BASE, "/movies/" + P.detailPath);
-    const res = await fetch(proxied(url, referer));
-    if (!res.ok) { capWrap.hidden = true; return; }
-    const json = await res.json();
-    const raw = json?.data?.captions || json?.data?.captionList || json?.data?.list || [];
-    if (!raw.length) { capWrap.hidden = true; return; }
-    player.captions = raw.map(c => ({
-      lang: pick(c, "lan", "lang") || "",
-      name: pick(c, "lanName", "language", "label") || "Subtitle",
-      url: pick(c, "url", "src", "file") || "",
-    })).filter(c => c.url);
-    capWrap.hidden = player.captions.length === 0;
-    if (player.captions.length) buildCaptionMenu();
-  } catch (_) { capWrap.hidden = true; }
-}
-
-function looksLikeSubtitle(text) {
-  if (!text || text.length < 15) return false;
-  return /-->/.test(text) || /WEBVTT/i.test(text);
-}
-
-async function fetchSubtitleText(url, referer) {
-  try {
-    const direct = await fetch(url, { credentials: "omit", cache: "no-store" });
-    const text = await direct.text();
-    if (looksLikeSubtitle(text)) return text;
-  } catch (_) {}
-
-  try {
-    const prox = await fetch(proxied(url, referer));
-    const text = await prox.text();
-    if (looksLikeSubtitle(text)) return text;
-    if (!prox.ok) throw new Error("HTTP " + prox.status);
-    throw new Error("Empty subtitle response");
-  } catch (e) {
-    throw new Error(e.message || "Subtitle fetch failed");
-  }
-}
-
-function buildCaptionMenu() {
-  capList.innerHTML =
-    '<button data-c="-1"' + (player.captionIndex === -1 ? ' class="active"' : '') + '><span>Off</span><span class="check">✓</span></button>' +
-    player.captions.map((c, i) =>
-      `<button data-c="${i}"${i === player.captionIndex ? ' class="active"' : ''}><span>${escapeHtml(c.name)}</span><span class="check">✓</span></button>`
-    ).join("") +
-    '<div style="height:1px;background:#2a2a33;margin:4px 0;"></div>' +
-    '<button data-action="settings"><span>⚙ Caption Style</span><span class="check"></span></button>';
-
-  capList.querySelectorAll("button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      if (btn.dataset.action === "settings") {
-        capList.hidden = true;
-        capBtn.classList.remove("open");
-        openCapSettings();
-        return;
-      }
-      const i = Number(btn.dataset.c);
-      capList.hidden = true;
-      capBtn.classList.remove("open");
-      if (i === -1) deselectCaption();
-      else selectCaption(i);
-    });
-  });
-}
-
-function deselectCaption() {
-  player.captionIndex = -1;
-  player.captionVttText = null;
-  removeCaptionTrack();
-  buildCaptionMenu();
-  capLabel.textContent = "CC";
-}
-
-async function selectCaption(idx) {
-  const cap = player.captions[idx];
-  if (!cap) return;
-  try {
-    const referer = absolute(BASE, "/movies/" + P.detailPath);
-    let text = await fetchSubtitleText(cap.url, referer);
-    text = text.replace(/^\uFEFF/, "");
-    if (!/^\s*WEBVTT/i.test(text)) {
-      text = "WEBVTT\n\n" + text
-        .replace(/\r+/g, "")
-        .replace(/^\d+\s*$/gm, "")
-        .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2")
-        .replace(/(\d{2}:\d{2}),(\d{3})/g, "00:$1.$2");
-    }
-    player.captionVttText = text;
-    applyCaptionTrack(text, cap.name);
-    player.captionIndex = idx;
-    capLabel.textContent = (cap.name || "CC").toUpperCase().slice(0, 8);
-    buildCaptionMenu();
-  } catch (e) {
-    console.warn("[caption] failed:", e && e.message);
-    showFeedback("Subtitle unavailable");
-    player.captionIndex = -1;
-    player.captionVttText = null;
-    removeCaptionTrack();
-    capLabel.textContent = "CC";
-    buildCaptionMenu();
-  }
-}
-
+/* ═══════════ CAPTIONS (RECONSTRUCTED) ═══════════ */
 function removeCaptionTrack() {
-  if (player.captionTrackEl) {
-    try { player.captionTrackEl.remove(); } catch (_) {}
-    player.captionTrackEl = null;
+  player._captionCues = null;
+  if (player._captionTick) {
+    video.removeEventListener("timeupdate", player._captionTick);
+    player._captionTick = null;
   }
+  if (player.captionTrackEl && player.captionTrackEl.parentNode) {
+    player.captionTrackEl.parentNode.removeChild(player.captionTrackEl);
+  }
+  player.captionTrackEl = null;
   if (player.captionBlobUrl) {
     try { URL.revokeObjectURL(player.captionBlobUrl); } catch (_) {}
     player.captionBlobUrl = null;
   }
-  if (captionOverlay) {
-    captionOverlay.hidden = true;
-    captionOverlay.innerHTML = "";
-  }
+  captionOverlay.innerHTML = "";
+  captionOverlay.hidden = true;
 }
 
-function applyCaptionTrack(vttText, label) {
+async function loadCaptionsForCurrentStream() {
+  // The play API response we normalize does not carry caption tracks.
+  // Clear state so a stale caption from the previous stream doesn't leak through.
+  player.captions = [];
+  player.captionIndex = -1;
+  player.captionVttText = null;
   removeCaptionTrack();
-  const blob = new Blob([vttText], { type: "text/vtt;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const track = document.createElement("track");
-  track.kind = "subtitles";
-  track.label = label || "Subtitle";
-  track.srclang = "en";
-  track.src = url;
-  track.default = true;
-  video.appendChild(track);
-  player.captionTrackEl = track;
-  player.captionBlobUrl = url;
-  setTimeout(() => {
-    const tt = track.track;
-    if (!tt) return;
-    tt.mode = "hidden";
-    tt.addEventListener("cuechange", renderCues);
-  }, 200);
+  capWrap.hidden = true;
+  capList.innerHTML = "";
 }
 
-function renderCues(e) {
-  const tt = e.target;
-  if (!tt || !captionOverlay) return;
-  if (player.captionIndex === -1) { captionOverlay.hidden = true; return; }
-  const cues = tt.activeCues;
-  if (!cues || !cues.length) { captionOverlay.hidden = true; return; }
-
-  const lines = [];
-  for (let i = 0; i < cues.length; i++) {
-    const raw = (cues[i].text || "").replace(/<[^>]+>/g, "").trim();
-    if (!raw) continue;
-    raw.split(/\r?\n/).forEach(l => {
-      const t = l.trim();
-      if (t) lines.push(t);
-    });
+function parseVttToCues(vtt) {
+  const cues = [];
+  const lines = String(vtt || "").replace(/\r\n/g, "\n").split("\n");
+  const timeRe = /^((?:\d{1,2}:)?\d{1,2}:\d{2}\.\d{3})\s*-->\s*((?:\d{1,2}:)?\d{1,2}:\d{2}\.\d{3})/;
+  function toSec(t) {
+    const parts = t.split(":").map(Number);
+    if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+    if (parts.length === 2) return parts[0]*60 + parts[1];
+    return parts[0];
   }
-  if (!lines.length) { captionOverlay.hidden = true; return; }
-  captionOverlay.innerHTML = lines
-    .map(l => '<div class="cap-line">' + escapeHtml(l) + "</div>")
-    .join("");
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i].trim().match(timeRe);
+    if (m) {
+      const start = toSec(m[1]);
+      const end = toSec(m[2]);
+      i++;
+      const textLines = [];
+      while (i < lines.length && lines[i].trim() !== "") {
+        textLines.push(lines[i]);
+        i++;
+      }
+      cues.push({ start, end, text: textLines.join("\n") });
+    } else {
+      i++;
+    }
+  }
+  return cues;
+}
+
+function applyCaptionTrack(vttText, name) {
+  player.captionVttText = vttText || "";
+  removeCaptionTrack();
+  if (!vttText) return;
+  player._captionCues = parseVttToCues(vttText);
   captionOverlay.hidden = false;
+  player._captionTick = () => {
+    const t = video.currentTime;
+    const cues = player._captionCues || [];
+    let active = null;
+    for (const c of cues) {
+      if (t >= c.start && t <= c.end) { active = c; break; }
+    }
+    if (active) {
+      const html = active.text.split("\n").map(line => `<div class="cap-line">${escapeHtml(line)}</div>`).join("");
+      if (captionOverlay.innerHTML !== html) captionOverlay.innerHTML = html;
+    } else if (captionOverlay.innerHTML) {
+      captionOverlay.innerHTML = "";
+    }
+  };
+  video.addEventListener("timeupdate", player._captionTick);
+}
+
+function buildCaptionMenu() {
+  const opts = [{ name: "Off", idx: -1 }].concat(player.captions.map((c, i) => ({ name: c.name || ("Caption " + (i + 1)), idx: i })));
+  capList.innerHTML = opts.map(o =>
+    `<button type="button" data-c="${o.idx}"${o.idx === player.captionIndex ? ' class="active"' : ''}><span>${escapeHtml(o.name)}</span><span class="check">✓</span></button>`
+  ).join("");
+  capList.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.dataset.c);
+      capList.hidden = true;
+      capBtn.classList.remove("open");
+      if (idx === player.captionIndex) return;
+      if (idx < 0) {
+        player.captionIndex = -1;
+        player.captionVttText = null;
+        removeCaptionTrack();
+      } else {
+        player.captionIndex = idx;
+        const cap = player.captions[idx];
+        if (cap && cap.url) {
+          try {
+            const res = await fetch(proxied(cap.url));
+            const vtt = await res.text();
+            applyCaptionTrack(vtt, cap.name);
+          } catch (_) {
+            player.captionIndex = -1;
+            removeCaptionTrack();
+          }
+        }
+      }
+      buildCaptionMenu();
+    });
+  });
+  const cur = player.captionIndex >= 0 ? player.captions[player.captionIndex] : null;
+  capLabel.textContent = cur ? (cur.name || "CC") : "CC";
+  capWrap.hidden = player.captions.length === 0;
 }
 
 capBtn.addEventListener("click", (e) => {
@@ -2650,11 +2641,10 @@ document.addEventListener("click", (e) => {
   }
 });
 
-/* ═══════════ CAPTION STYLE SETTINGS ═══════════ */
-const CAP_STYLE_KEY = "playerCaptionStyle";
-const DEFAULT_CAP_STYLE = {
-  font: "sans",
-  size: 100,
+/* ═══════════ CAPTION SETTINGS PANEL (RECONSTRUCTED) ═══════════ */
+const CAP_DEFAULTS = {
+  fontFamily: "sans",
+  fontSize: 100,
   textColor: "#ffffff",
   textOpacity: 100,
   bgColor: "#000000",
@@ -2663,141 +2653,105 @@ const DEFAULT_CAP_STYLE = {
   bold: false,
   shadow: true,
 };
-
-function loadCapStyle() {
-  try {
-    const raw = localStorage.getItem(CAP_STYLE_KEY);
-    if (!raw) return { ...DEFAULT_CAP_STYLE };
-    return { ...DEFAULT_CAP_STYLE, ...JSON.parse(raw) };
-  } catch (_) { return { ...DEFAULT_CAP_STYLE }; }
-}
-let capStyle = loadCapStyle();
-
-function saveCapStyle() {
-  try { localStorage.setItem(CAP_STYLE_KEY, JSON.stringify(capStyle)); } catch (_) {}
-}
+let capSettings = { ...CAP_DEFAULTS };
 
 function hexToRgba(hex, alpha) {
-  const h = String(hex || "#000000").replace("#", "");
-  const r = parseInt(h.substring(0, 2), 16) || 0;
-  const g = parseInt(h.substring(2, 4), 16) || 0;
-  const b = parseInt(h.substring(4, 6), 16) || 0;
-  return "rgba(" + r + "," + g + "," + b + "," + Math.max(0, Math.min(1, alpha)) + ")";
+  const m = String(hex).replace("#", "").match(/^([0-9a-f]{6})$/i);
+  if (!m) return `rgba(255,255,255,${alpha})`;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
 }
 
-function buildCapCssVars() {
-  const fontMap = {
-    sans: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    serif: 'Georgia, "Times New Roman", serif',
-    mono: 'ui-monospace, "Courier New", Consolas, monospace',
-  };
-  const sizeEm = (capStyle.size / 100) * 1.2;
-  return {
-    "--cap-font-family": fontMap[capStyle.font] || fontMap.sans,
-    "--cap-font-size": sizeEm + "em",
-    "--cap-font-weight": capStyle.bold ? "700" : "400",
-    "--cap-text-color": hexToRgba(capStyle.textColor, capStyle.textOpacity / 100),
-    "--cap-bg-color": hexToRgba(capStyle.bgColor, capStyle.bgOpacity / 100),
-    "--cap-text-shadow": capStyle.shadow ? "0 1px 3px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)" : "none",
-  };
-}
-
-function applyCapStyle() {
-  const vars = buildCapCssVars();
-  for (const el of [captionOverlay, capSettingsPreview]) {
-    for (const [k, v] of Object.entries(vars)) el.style.setProperty(k, v);
+function applyCapSettings() {
+  const root = document.documentElement;
+  const fam = capSettings.fontFamily === "serif" ? "Georgia, serif"
+            : capSettings.fontFamily === "mono" ? "ui-monospace, monospace"
+            : "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+  root.style.setProperty("--cap-font-family", fam);
+  root.style.setProperty("--cap-font-size", (1.2 * capSettings.fontSize / 100) + "em");
+  root.style.setProperty("--cap-font-weight", capSettings.bold ? "700" : "400");
+  root.style.setProperty("--cap-text-color", hexToRgba(capSettings.textColor, capSettings.textOpacity / 100));
+  root.style.setProperty("--cap-bg-color", hexToRgba(capSettings.bgColor, capSettings.bgOpacity / 100));
+  root.style.setProperty("--cap-text-shadow", capSettings.shadow ? "0 1px 3px rgba(0,0,0,0.9)" : "none");
+  captionOverlay.style.bottom = capSettings.position + "%";
+  if (capSettingsPreview) {
+    capSettingsPreview.querySelectorAll(".cap-line").forEach(el => {
+      el.style.fontSize = (1.2 * capSettings.fontSize / 100) + "em";
+    });
   }
-  captionOverlay.style.bottom = capStyle.position + "%";
-
-  const previewLine = capSettingsPreview.querySelector(".cap-line");
-  if (previewLine) previewLine.style.bottom = capStyle.position + "%";
 }
 
-function updateCapUI() {
-  document.getElementById("capFontFamily").value = capStyle.font;
-  document.getElementById("capFontSize").value = capStyle.size;
-  document.getElementById("capFontSizeVal").textContent = capStyle.size + "%";
-  document.getElementById("capTextColor").value = capStyle.textColor;
-  document.getElementById("capTextOpacity").value = capStyle.textOpacity;
-  document.getElementById("capTextOpacityVal").textContent = capStyle.textOpacity + "%";
-  document.getElementById("capBgColor").value = capStyle.bgColor;
-  document.getElementById("capBgOpacity").value = capStyle.bgOpacity;
-  document.getElementById("capBgOpacityVal").textContent = capStyle.bgOpacity + "%";
-  document.getElementById("capPosition").value = capStyle.position;
-  document.getElementById("capPositionVal").textContent = capStyle.position + "%";
-  document.getElementById("capBold").checked = capStyle.bold;
-  document.getElementById("capShadow").checked = capStyle.shadow;
+function loadCapSettings() {
+  try {
+    const raw = localStorage.getItem("capSettings");
+    if (raw) capSettings = { ...CAP_DEFAULTS, ...JSON.parse(raw) };
+  } catch (_) {}
+  syncCapSettingsInputs();
+  applyCapSettings();
+}
+
+function saveCapSettings() {
+  try { localStorage.setItem("capSettings", JSON.stringify(capSettings)); } catch (_) {}
+}
+
+function syncCapSettingsInputs() {
+  const $ = (id) => document.getElementById(id);
+  if (!$("capFontFamily")) return;
+  $("capFontFamily").value = capSettings.fontFamily;
+  $("capFontSize").value = capSettings.fontSize;
+  $("capFontSizeVal").textContent = capSettings.fontSize + "%";
+  $("capTextColor").value = capSettings.textColor;
+  $("capTextOpacity").value = capSettings.textOpacity;
+  $("capTextOpacityVal").textContent = capSettings.textOpacity + "%";
+  $("capBgColor").value = capSettings.bgColor;
+  $("capBgOpacity").value = capSettings.bgOpacity;
+  $("capBgOpacityVal").textContent = capSettings.bgOpacity + "%";
+  $("capPosition").value = capSettings.position;
+  $("capPositionVal").textContent = capSettings.position + "%";
+  $("capBold").checked = !!capSettings.bold;
+  $("capShadow").checked = !!capSettings.shadow;
 }
 
 function openCapSettings() {
-  updateCapUI();
-  applyCapStyle();
+  if (capSettingsOpen) return;
+  capSettingsOpen = true;
+  syncCapSettingsInputs();
+  capSettingsPreview.hidden = false;
   capSettingsPanel.hidden = false;
   capSettingsBackdrop.hidden = false;
-  playerUI.classList.remove("idle");
-  clearTimeout(idleTimer);
 }
 function closeCapSettings() {
+  if (!capSettingsOpen) return;
+  capSettingsOpen = false;
   capSettingsPanel.hidden = true;
   capSettingsBackdrop.hidden = true;
-  resetIdleTimer();
 }
 
-document.getElementById("capFontFamily").addEventListener("change", (e) => {
-  capStyle.font = e.target.value; saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capFontSize").addEventListener("input", (e) => {
-  capStyle.size = Number(e.target.value);
-  document.getElementById("capFontSizeVal").textContent = capStyle.size + "%";
-  saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capTextColor").addEventListener("input", (e) => {
-  capStyle.textColor = e.target.value; saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capTextOpacity").addEventListener("input", (e) => {
-  capStyle.textOpacity = Number(e.target.value);
-  document.getElementById("capTextOpacityVal").textContent = capStyle.textOpacity + "%";
-  saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capBgColor").addEventListener("input", (e) => {
-  capStyle.bgColor = e.target.value; saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capBgOpacity").addEventListener("input", (e) => {
-  capStyle.bgOpacity = Number(e.target.value);
-  document.getElementById("capBgOpacityVal").textContent = capStyle.bgOpacity + "%";
-  saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capPosition").addEventListener("input", (e) => {
-  capStyle.position = Number(e.target.value);
-  document.getElementById("capPositionVal").textContent = capStyle.position + "%";
-  saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capBold").addEventListener("change", (e) => {
-  capStyle.bold = e.target.checked; saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capShadow").addEventListener("change", (e) => {
-  capStyle.shadow = e.target.checked; saveCapStyle(); applyCapStyle();
-});
-document.getElementById("capSettingsReset").addEventListener("click", () => {
-  capStyle = { ...DEFAULT_CAP_STYLE };
-  saveCapStyle();
-  updateCapUI();
-  applyCapStyle();
-});
-document.getElementById("capSettingsDone").addEventListener("click", closeCapSettings);
-document.getElementById("capSettingsClose").addEventListener("click", closeCapSettings);
-capSettingsBackdrop.addEventListener("click", closeCapSettings);
+(function wireCapSettings() {
+  const $ = (id) => document.getElementById(id);
+  if (!$("capFontFamily")) return;
+  $("capFontFamily").addEventListener("change", (e) => { capSettings.fontFamily = e.target.value; applyCapSettings(); });
+  $("capFontSize").addEventListener("input", (e) => { capSettings.fontSize = Number(e.target.value); $("capFontSizeVal").textContent = capSettings.fontSize + "%"; applyCapSettings(); });
+  $("capTextColor").addEventListener("input", (e) => { capSettings.textColor = e.target.value; applyCapSettings(); });
+  $("capTextOpacity").addEventListener("input", (e) => { capSettings.textOpacity = Number(e.target.value); $("capTextOpacityVal").textContent = capSettings.textOpacity + "%"; applyCapSettings(); });
+  $("capBgColor").addEventListener("input", (e) => { capSettings.bgColor = e.target.value; applyCapSettings(); });
+  $("capBgOpacity").addEventListener("input", (e) => { capSettings.bgOpacity = Number(e.target.value); $("capBgOpacityVal").textContent = capSettings.bgOpacity + "%"; applyCapSettings(); });
+  $("capPosition").addEventListener("input", (e) => { capSettings.position = Number(e.target.value); $("capPositionVal").textContent = capSettings.position + "%"; applyCapSettings(); });
+  $("capBold").addEventListener("change", (e) => { capSettings.bold = e.target.checked; applyCapSettings(); });
+  $("capShadow").addEventListener("change", (e) => { capSettings.shadow = e.target.checked; applyCapSettings(); });
+  $("capSettingsReset").addEventListener("click", () => { capSettings = { ...CAP_DEFAULTS }; syncCapSettingsInputs(); applyCapSettings(); });
+  $("capSettingsDone").addEventListener("click", () => { saveCapSettings(); closeCapSettings(); });
+  $("capSettingsClose").addEventListener("click", () => { saveCapSettings(); closeCapSettings(); });
+  capSettingsBackdrop.addEventListener("click", () => { saveCapSettings(); closeCapSettings(); });
+})();
 
-/* ═══════════ DRAWER ═══════════ */
-let drawerOpen = false;
-
+/* ═══════════ DRAWER (RECONSTRUCTED) ═══════════ */
 function openDrawer() {
   if (drawerOpen) return;
   drawerOpen = true;
-  document.body.classList.add("drawer-open");
   drawerEl.hidden = false;
   drawerBackdrop.hidden = false;
-  playerUI.classList.remove("idle");
+  document.body.classList.add("drawer-open");
   renderDrawerContent();
 }
 function closeDrawer() {
@@ -2811,251 +2765,203 @@ function closeDrawer() {
     document.body.classList.remove("drawer-open");
   }, 220);
 }
-drawerToggleBtn.addEventListener("click", (e) => { e.stopPropagation(); openDrawer(); });
-document.getElementById("drawerClose").addEventListener("click", (e) => { e.stopPropagation(); closeDrawer(); });
-drawerBackdrop.addEventListener("click", () => closeDrawer());
-drawerEl.addEventListener("click", (e) => e.stopPropagation());
 
 function renderDrawerContent() {
-  if (player.seriesLoading) {
-    drawerBody.innerHTML = '<div class="drawer-loading"><div class="spinner"></div>Loading…</div>';
-    return;
+  const multiSeason = player.seasons.length > 1;
+  drawerEyebrow.textContent = player.detailTitle || P.title;
+  drawerTitle.textContent = multiSeason ? "Seasons & Episodes" : "Episodes";
+  const { prev, next } = getPrevNextEp();
+  let html = "";
+  html += `<div class="drawer-ep-nav">`;
+  html += `<button class="drawer-ep-nav-btn" data-prev ${prev ? "" : "disabled"}><svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg><span>${prev ? "Previous" : "—"}</span></button>`;
+  html += `<button class="drawer-ep-nav-btn" data-next ${next ? "" : "disabled"}><span>${next ? "Next" : "—"}</span><svg viewBox="0 0 24 24"><path d="M8.59 16.59L10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg></button>`;
+  html += `</div>`;
+  if (multiSeason) {
+    html += `<div class="drawer-season-row"><label>Season</label><select class="drawer-season-select" id="drawerSeasonSelect">`;
+    for (const s of player.seasons) {
+      html += `<option value="${s.se}"${Number(s.se) === Number(player.currentSe) ? " selected" : ""}>${escapeHtml(s.title || ("Season " + s.se))}</option>`;
+    }
+    html += `</select></div>`;
   }
-  if (P.isSeries && player.seasons.length) {
-    drawerEyebrow.textContent = "Browse";
-    drawerTitle.textContent = "Episodes";
-    renderDrawerEpisodes();
-  } else if (player.detailRelated.length) {
-    drawerEyebrow.textContent = "Discover";
-    drawerTitle.textContent = "Related";
-    renderDrawerRelated();
-  } else {
-    drawerEyebrow.textContent = "Info";
-    drawerTitle.textContent = "No additional info";
-    drawerBody.innerHTML = '<div class="drawer-empty">No episodes or related titles available.</div>';
+  html += `<div class="drawer-section" id="drawerEpSection"></div>`;
+  if (player.detailRelated.length) {
+    html += `<div class="drawer-section"><div class="drawer-eyebrow" style="margin-bottom:10px;">More like this</div><div class="drawer-related-grid" id="drawerRelatedGrid"></div></div>`;
   }
+  drawerBody.innerHTML = html;
+  renderDrawerSeasonEpisodes(Number(player.currentSe));
+  if (player.detailRelated.length) renderDrawerRelated();
+  const prevBtn = drawerBody.querySelector("[data-prev]");
+  if (prevBtn) prevBtn.addEventListener("click", () => { if (prev) navigateToEpisode(prev.se, prev.ep); });
+  const nextBtn = drawerBody.querySelector("[data-next]");
+  if (nextBtn) nextBtn.addEventListener("click", () => { if (next) navigateToEpisode(next.se, next.ep); });
+  const sel = drawerBody.querySelector("#drawerSeasonSelect");
+  if (sel) sel.addEventListener("change", () => renderDrawerSeasonEpisodes(Number(sel.value)));
 }
 
-function renderDrawerEpisodes() {
-  let si = player.seasons.findIndex(s => Number(s.se) === Number(player.currentSe));
-  if (si < 0) si = 0;
-  const season = player.seasons[si];
-
-  const seasonSelect = player.seasons.length > 1
-    ? `<div class="drawer-season-row">
-        <label>Season</label>
-        <select class="drawer-season-select" id="drawerSeasonSelect">
-          ${player.seasons.map((s, i) => `<option value="${i}"${i === si ? " selected" : ""}>${escapeHtml(s.title)}</option>`).join("")}
-        </select>
-      </div>`
-    : "";
-
-  const { prev, next } = getPrevNextEp();
-  const navHtml = `<div class="drawer-ep-nav">
-    <button class="drawer-ep-nav-btn" id="drawerPrevEp"${prev ? "" : " disabled"}>
-      <svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
-      <span>Previous</span>
-    </button>
-    <button class="drawer-ep-nav-btn" id="drawerNextEp"${next ? "" : " disabled"}>
-      <span>Next</span>
-      <svg viewBox="0 0 24 24"><path d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>
-    </button>
-  </div>`;
-
-  const epBtns = season.episodes.map(e => {
-    const isCurrent = Number(season.se) === Number(player.currentSe) && Number(e.ep) === Number(player.currentEp);
-    return `<button class="drawer-ep-btn${isCurrent ? " active" : ""}" data-se="${season.se}" data-ep="${e.ep}">E${String(e.ep).padStart(2, "0")}</button>`;
-  }).join("");
-
-  drawerBody.innerHTML = `<div class="drawer-section">${navHtml}${seasonSelect}<div class="drawer-ep-grid">${epBtns}</div></div>`;
-
-  const prevBtn = document.getElementById("drawerPrevEp");
-  if (prevBtn && prev) prevBtn.addEventListener("click", () => navigateToEpisode(prev.se, prev.ep));
-  const nextBtn = document.getElementById("drawerNextEp");
-  if (nextBtn && next) nextBtn.addEventListener("click", () => navigateToEpisode(next.se, next.ep));
-
-  const sel = document.getElementById("drawerSeasonSelect");
-  if (sel) sel.addEventListener("change", (ev) => {
-    const newSi = Number(ev.target.value);
-    renderDrawerSeasonEpisodes(player.seasons[newSi]);
-  });
-
-  drawerBody.querySelectorAll(".drawer-ep-btn").forEach(btn => {
+function renderDrawerSeasonEpisodes(se) {
+  const season = player.seasons.find(s => Number(s.se) === Number(se));
+  const section = drawerBody.querySelector("#drawerEpSection");
+  if (!section || !season) return;
+  section.innerHTML = `<div class="drawer-ep-grid">${
+    season.episodes.map(e =>
+      `<button class="drawer-ep-btn${Number(e.ep) === Number(player.currentEp) && Number(se) === Number(player.currentSe) ? " active" : ""}" data-se="${se}" data-ep="${e.ep}">E${String(e.ep).padStart(2, "0")}</button>`
+    ).join("")
+  }</div>`;
+  section.querySelectorAll(".drawer-ep-btn").forEach(btn => {
     btn.addEventListener("click", () => navigateToEpisode(Number(btn.dataset.se), Number(btn.dataset.ep)));
   });
 }
 
-function renderDrawerSeasonEpisodes(season) {
-  const epBtns = season.episodes.map(e => {
-    const isCurrent = Number(season.se) === Number(player.currentSe) && Number(e.ep) === Number(player.currentEp);
-    return `<button class="drawer-ep-btn${isCurrent ? " active" : ""}" data-se="${season.se}" data-ep="${e.ep}">E${String(e.ep).padStart(2, "0")}</button>`;
-  }).join("");
-  const grid = drawerBody.querySelector(".drawer-ep-grid");
-  if (grid) {
-    grid.innerHTML = epBtns;
-    grid.querySelectorAll(".drawer-ep-btn").forEach(btn => {
-      btn.addEventListener("click", () => navigateToEpisode(Number(btn.dataset.se), Number(btn.dataset.ep)));
-    });
-  }
-}
-
 function renderDrawerRelated() {
-  const cards = player.detailRelated.slice(0, 30).map(it => {
-    const img = it.image
-      ? `<img src="${escapeHtml(it.image)}" alt="" loading="lazy" onerror="this.style.display='none'" />`
-      : `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:800;color:rgba(255,255,255,.3);background:linear-gradient(135deg,#1e1e25 0%,#2a2a33 100%)">${escapeHtml((it.title || "?").charAt(0).toUpperCase())}</div>`;
-    const badge = it.isTV ? '<span class="drawer-related-badge">TV</span>' : '';
-    return `<button class="drawer-related-card" data-detail="${escapeHtml(it.detailPath)}" data-subject="${escapeHtml(it.subjectId)}">
-      <div class="drawer-related-poster">${img}${badge}</div>
-      <div class="drawer-related-title">${escapeHtml(it.title)}</div>
-    </button>`;
-  }).join("");
-
-  drawerBody.innerHTML = `<div class="drawer-section"><div class="drawer-related-grid">${cards}</div></div>`;
-
-  drawerBody.querySelectorAll(".drawer-related-card").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const dp = btn.dataset.detail;
-      const sid = btn.dataset.subject;
-      if (!dp) return;
-      const params = new URLSearchParams({
-        detailPath: dp, mainDetailPath: dp, subjectId: sid,
-        isSeries: "1", title: "", subtitle: "", lang: "Original Audio",
-        se: "1", ep: "1",
-      });
-      location.href = "player.html?" + params.toString();
+  const grid = drawerBody.querySelector("#drawerRelatedGrid");
+  if (!grid) return;
+  grid.innerHTML = player.detailRelated.slice(0, 12).map(r =>
+    `<button class="drawer-related-card" data-path="${escapeHtml(r.detailPath)}" data-subject="${escapeHtml(r.subjectId)}" data-title="${escapeHtml(r.title)}" data-tv="${r.isTV ? "1" : "0"}">
+      <div class="drawer-related-poster"><img src="${escapeHtml(r.image)}" alt="" loading="lazy" />${r.isTV ? '<span class="drawer-related-badge">Series</span>' : ''}</div>
+      <div class="drawer-related-title">${escapeHtml(r.title)}</div>
+    </button>`
+  ).join("");
+  grid.querySelectorAll(".drawer-related-card").forEach(card => {
+    card.addEventListener("click", () => {
+      const url = new URL(location.href);
+      url.searchParams.set("detailPath", card.dataset.path);
+      url.searchParams.set("mainDetailPath", card.dataset.path);
+      url.searchParams.set("subjectId", card.dataset.subject);
+      url.searchParams.set("title", card.dataset.title);
+      url.searchParams.set("isSeries", card.dataset.tv);
+      location.href = url.toString();
     });
   });
 }
 
-/* ═══════════ PLAYER ACTIONS ═══════════ */
+drawerToggleBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (drawerOpen) closeDrawer(); else openDrawer();
+});
+document.getElementById("drawerClose").addEventListener("click", closeDrawer);
+drawerBackdrop.addEventListener("click", closeDrawer);
+
+/* ═══════════ TOP BAR / OVERLAY / NAV (RECONSTRUCTED) ═══════════ */
+document.getElementById("playerBack").addEventListener("click", () => history.back());
+document.getElementById("playerBack2").addEventListener("click", () => history.back());
+document.getElementById("playerHome").addEventListener("click", () => { location.href = "/"; });
+
+document.getElementById("playerRetry").addEventListener("click", () => {
+  player.triedUrls.clear();
+  player.apiRefreshes = 0;
+  player.attemptCount = 0;
+  startPlayback({ isRetry: false });
+});
 document.getElementById("loadingSkip").addEventListener("click", () => {
   advanceToNextStream("user skipped");
 });
 document.getElementById("loadingGiveup").addEventListener("click", () => {
-  failPlayback("Cancelled", "You stopped trying to play this stream.");
-});
-document.getElementById("playerRetry").addEventListener("click", () => {
-  player.attemptCount = 0;
-  player.apiRefreshes = 0;
-  player.triedUrls.clear();
-  player.streams = [];
-  startPlayback({ isRetry: false });
-});
-document.getElementById("playerBack2").addEventListener("click", () => {
-  if (history.length > 1) history.back();
-  else location.href = "index.html";
+  failPlayback("Cancelled", "You cancelled playback.");
 });
 
-/* ═══════════ KEYBOARD ═══════════ */
-document.addEventListener("keydown", (e) => {
-  if (e.target.matches("input, select, textarea")) return;
-  if (e.key === "Escape") {
-    if (!capSettingsPanel.hidden) { closeCapSettings(); return; }
-    if (drawerOpen) { closeDrawer(); return; }
-    if (history.length > 1) history.back();
-    else location.href = "index.html";
-    return;
-  }
-  switch (e.key) {
-    case " ": case "k": case "K": e.preventDefault(); togglePlay(); break;
-    case "ArrowRight": e.preventDefault(); if (video.duration) video.currentTime = Math.min(video.duration, video.currentTime + 10); break;
-    case "ArrowLeft": e.preventDefault(); if (video.duration) video.currentTime = Math.max(0, video.currentTime - 10); break;
-    case "ArrowUp": e.preventDefault(); setVolumeBoost(volumeBoost + 0.1); break;
-    case "ArrowDown": e.preventDefault(); setVolumeBoost(volumeBoost - 0.1); break;
-    case "m": case "M": e.preventDefault(); video.muted = !video.muted; break;
-    case "f": case "F": e.preventDefault(); toggleFullscreen(); break;
-    case "b": case "B": e.preventDefault(); if (drawerOpen) closeDrawer(); else if (!drawerToggleBtn.hidden) openDrawer(); break;
-    case "c": case "C": e.preventDefault(); if (!capWrap.hidden) { capList.hidden = !capList.hidden; capBtn.classList.toggle("open", !capList.hidden); } break;
-    case "q": case "Q": e.preventDefault(); if (!qualityWrap.hidden) { qualityList.hidden = !qualityList.hidden; qualityBtn.classList.toggle("open", !qualityList.hidden); } break;
-    case "[": e.preventDefault(); setBrightness(brightness - 0.1); break;
-    case "]": e.preventDefault(); setBrightness(brightness + 0.1); break;
-  }
-});
-
-/* ═══════════ FULLSCREEN / PIP ═══════════ */
-async function toggleFullscreen() {
+/* ═══════════ FULLSCREEN BUTTON ═══════════ */
+document.getElementById("btnFull").addEventListener("click", (e) => {
+  e.stopPropagation();
   if (isCurrentlyFullscreen()) {
-    _lastEntryWasAuto = false;
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    else if (document.msExitFullscreen) document.msExitFullscreen();
+  } else {
+    const el = document.documentElement;
     try {
-      if (document.exitFullscreen) await document.exitFullscreen();
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-      else if (document.msExitFullscreen) document.msExitFullscreen();
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.msRequestFullscreen) el.msRequestFullscreen();
     } catch (_) {}
-    try {
-      if (screen.orientation && screen.orientation.unlock) {
-        screen.orientation.unlock();
-      }
-    } catch (_) {}
-    return;
   }
+  resetIdleTimer();
+});
 
-  _lastEntryWasAuto = false;
-  const el = document.documentElement;
+/* ═══════════ PICTURE-IN-PICTURE ═══════════ */
+document.getElementById("btnPip").addEventListener("click", async (e) => {
+  e.stopPropagation();
   try {
-    if (el.requestFullscreen) await el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-    else if (el.msRequestFullscreen) await el.msRequestFullscreen();
-  } catch (_) {
-    return;
-  }
-
-  if (IS_MOBILE) {
-    try {
-      if (screen.orientation && screen.orientation.lock) {
-        await screen.orientation.lock("landscape").catch(() => {});
-      }
-    } catch (_) {}
-  }
-}
-document.getElementById("btnFull").addEventListener("click", toggleFullscreen);
-document.getElementById("btnPip").addEventListener("click", async () => {
-  try {
-    if (document.pictureInPictureElement) await document.exitPictureInPicture();
-    else await video.requestPictureInPicture();
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else if (video.requestPictureInPicture) {
+      await video.requestPictureInPicture();
+    }
   } catch (_) {}
+  resetIdleTimer();
 });
 
-/* ═══════════ NAVIGATION ═══════════ */
-document.getElementById("playerBack").addEventListener("click", () => {
-  if (history.length > 1) history.back();
-  else location.href = "index.html";
-});
-document.getElementById("playerHome").addEventListener("click", () => {
-  location.href = "index.html";
-});
+/* ═══════════ KEYBOARD SHORTCUTS (RECONSTRUCTED) ═══════════ */
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
 
-window.addEventListener("popstate", () => {
-  const url = new URL(location.href);
-  const q = url.searchParams;
-  const newSe = q.get("se") || "";
-  const newEp = q.get("ep") || "";
-  if (newSe !== P.se || newEp !== P.ep) {
-    P.se = newSe;
-    P.ep = newEp;
-    player.currentSe = Number(newSe) || 0;
-    player.currentEp = Number(newEp) || 1;
-    resetPlayerForNewEpisode();
-    startPlayback({ isRetry: false });
+document.addEventListener("keydown", (e) => {
+  if (isTypingTarget(e.target)) return;
+  const key = e.key;
+
+  if (key === " " || key === "k" || key === "K") {
+    e.preventDefault();
+    togglePlay();
+    resetIdleTimer();
+    return;
+  }
+  if (key === "ArrowLeft") { e.preventDefault(); doFrameSeek(-1); return; }
+  if (key === "ArrowRight") { e.preventDefault(); doFrameSeek(1); return; }
+
+  if (key === "f" || key === "F") {
+    e.preventDefault();
+    document.getElementById("btnFull").click();
+    return;
+  }
+  if (key === "i" || key === "I") {
+    e.preventDefault();
+    document.getElementById("btnPip").click();
+    return;
+  }
+  if (key === "q" || key === "Q") {
+    e.preventDefault();
+    if (!qualityWrap.hidden) qualityBtn.click();
+    return;
+  }
+  if (key === "c" || key === "C") {
+    e.preventDefault();
+    if (!capWrap.hidden) capBtn.click();
+    return;
+  }
+  if (key === "b" || key === "B") {
+    e.preventDefault();
+    if (!drawerToggleBtn.hidden) drawerToggleBtn.click();
+    return;
+  }
+  if (key === "m" || key === "M") {
+    e.preventDefault();
+    video.muted = !video.muted;
+    return;
+  }
+  if (key === "Escape") {
+    if (capSettingsOpen) { closeCapSettings(); return; }
+    if (drawerOpen) { closeDrawer(); return; }
+    if (isCurrentlyFullscreen()) {
+      if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+      return;
+    }
+    history.back();
   }
 });
 
-/* ═══════════ BOOT ═══════════ */
-playerTitle.textContent = P.title;
-playerSub.textContent = P.subtitle;
-player.currentSe = Number(P.se) || 0;
-player.currentEp = Number(P.ep) || 1;
-if (P.isSeries) drawerToggleBtn.hidden = false;
+/* ═══════════ BOOT (RECONSTRUCTED) ═══════════ */
+(function boot() {
+  loadCapSettings();
 
-applyCapStyle();
-updateCapUI();
+  playerTitle.textContent = P.title || "Now Playing";
+  playerSub.textContent = P.subtitle || (P.isSeries ? "Season " + P.se + " · Episode " + P.ep : "");
+  document.title = P.title ? (P.title + " — Now Playing") : "Now Playing…";
 
-if (!P.streamUrl && (!P.detailPath || !P.subjectId)) {
-  failPlayback("Missing URL parameters", "Open this page from the catalog.");
-} else {
-  playerLoading.hidden = true;
+  setPlayIcon(false);
   startPlayback({ isRetry: false });
-}
+})();
 </script>
 </body>
 </html>
