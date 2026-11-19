@@ -3,15 +3,14 @@ name = "fernandezdean02/dean-tv"
 version = "0.1.0"
 
 [dependencies]
-"wasmer/python" = "^3.12.6"
+"wasmer/python" = "^3.13"
 
 [fs]
-"/server.py" = "./api.py"
+"/api.py" = "./api.py"
 "/index.html" = "./index.html"
 "/player.html" = "./player.html"
 "/detail.html" = "./detail.html"
 "/providers.json" = "./providers.json"
-"/cpython/lib/python3.12/site-packages" = "./.env/lib/python3.12/site-packages"
 
 [[command]]
 name = "start"
