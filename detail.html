@@ -988,7 +988,6 @@ async function tryMovieBoxEndpoint(endpoint, query, isTV) {
 
     console.log("[match] response length:", html.length);
     console.log("[match] has NUXT_DATA:", html.includes("__NUXT_DATA__"));
-    console.log("[match] first 200 chars:", html.slice(0, 200));
 
     const resolved = extractNuxt3Payload(html);
     if (!resolved) {
@@ -1050,7 +1049,7 @@ function tryHtmlFallback(html, query, isTV) {
   return null;
 }
 
-/* ═══════════ LOAD MOVIEBOX ═══════════ */
+/* ═══════════ LOAD MOVIEBOX (enhanced debug) ═══════════ */
 async function loadMovieBox(detailPath, subjectId) {
   state.moviebox.status = "loading";
   state.moviebox.detailPath = detailPath;
@@ -1059,42 +1058,86 @@ async function loadMovieBox(detailPath, subjectId) {
 
   try {
     const realUrl = BASE + "/moviesDetail/" + detailPath;
+    console.log("[moviebox] loading:", realUrl);
     const res = await fetch(PROXY + "/proxy?url=" + encodeURIComponent(realUrl) + "&referer=" + encodeURIComponent(BASE + "/"));
+    console.log("[moviebox] HTTP status:", res.status);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const html = await res.text();
+    console.log("[moviebox] html length:", html.length);
+    console.log("[moviebox] has NUXT_DATA:", html.includes("__NUXT_DATA__"));
+
     const resolved = extractNuxt3Payload(html);
     if (!resolved) throw new Error("No Nuxt payload");
+    console.log("[moviebox] NUXT decoded OK, top-level type:", typeof resolved);
+
     const detail = findDetailRoot(resolved);
-    if (!detail) throw new Error("No subject");
-
-    const subject = detail.subject;
-    const resource = detail.resource || {};
-    const isSeries = Number(subject.subjectType) === 2;
-
-    state.moviebox.data = {
-      subjectId: String(subject.subjectId || subjectId || ""),
-      detailPath: subject.detailPath || detailPath,
-      title: subject.title || "",
-      description: subject.description || "",
-      cover: imgUrl(subject.cover),
-      isSeries,
-      dubs: (Array.isArray(subject.dubs) ? subject.dubs : []).filter(d => d && d.subjectId),
-      seasons: normalizeSeasons(resource.seasons || [], isSeries),
-    };
-    state.moviebox.selectedSe = state.moviebox.data.seasons[0]?.se ?? 0;
-    state.moviebox.selectedEp = state.moviebox.data.seasons[0]?.episodes?.[0]?.ep ?? 1;
-    state.moviebox.status = "ok";
-
-    if (state.hero.title === Q.title || !state.hero.title) {
-      state.hero.title = state.moviebox.data.title;
-      if (!state.hero.poster && state.moviebox.data.cover) state.hero.poster = state.moviebox.data.cover;
-      if (!state.hero.overview && state.moviebox.data.description) state.hero.overview = state.moviebox.data.description;
+    console.log("[moviebox] detail root found:", !!detail);
+    if (!detail) {
+      console.warn("[moviebox] detail root not found, trying broader scan...");
+      const scanResult = scanForSubject(resolved);
+      console.log("[moviebox] scan result:", scanResult ? "found" : "not found");
+      if (scanResult) return processMovieBoxDetail(scanResult, detailPath, subjectId);
+      throw new Error("No subject");
     }
+
+    return processMovieBoxDetail(detail, detailPath, subjectId);
   } catch (e) {
+    console.warn("[moviebox] error:", e.message);
     state.moviebox.error = e.message;
     state.moviebox.status = "error";
+    render();
+  }
+}
+
+function processMovieBoxDetail(detail, detailPath, subjectId) {
+  const subject = detail.subject;
+  const resource = detail.resource || {};
+  const isSeries = Number(subject.subjectType) === 2;
+  console.log("[moviebox] subject title:", subject.title);
+  console.log("[moviebox] subject type:", subject.subjectType, "isSeries:", isSeries);
+  console.log("[moviebox] dubs:", (subject.dubs || []).length);
+  console.log("[moviebox] seasons:", (resource.seasons || []).length);
+
+  state.moviebox.data = {
+    subjectId: String(subject.subjectId || subjectId || ""),
+    detailPath: subject.detailPath || detailPath,
+    title: subject.title || "",
+    description: subject.description || "",
+    cover: imgUrl(subject.cover),
+    isSeries,
+    dubs: (Array.isArray(subject.dubs) ? subject.dubs : []).filter(d => d && d.subjectId),
+    seasons: normalizeSeasons(resource.seasons || [], isSeries),
+  };
+  state.moviebox.selectedSe = state.moviebox.data.seasons[0]?.se ?? 0;
+  state.moviebox.selectedEp = state.moviebox.data.seasons[0]?.episodes?.[0]?.ep ?? 1;
+  state.moviebox.status = "ok";
+
+  if (state.hero.title === Q.title || !state.hero.title) {
+    state.hero.title = state.moviebox.data.title;
+    if (!state.hero.poster && state.moviebox.data.cover) state.hero.poster = state.moviebox.data.cover;
+    if (!state.hero.overview && state.moviebox.data.description) state.hero.overview = state.moviebox.data.description;
   }
   render();
+}
+
+function scanForSubject(root) {
+  const visited = new WeakSet();
+  let found = null;
+  function walk(node, depth) {
+    if (found || depth > 80 || !node || typeof node !== "object" || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) { walk(item, depth + 1); if (found) return; }
+      return;
+    }
+    if (node.subjectId && node.detailPath && node.title) {
+      found = { subject: node, resource: node.resource || {} };
+      return;
+    }
+    for (const k of Object.keys(node)) walk(node[k], depth + 1);
+  }
+  walk(root, 0);
+  return found;
 }
 
 /* ═══════════ HERO ENRICHMENT ═══════════ */
