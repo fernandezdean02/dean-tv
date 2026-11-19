@@ -565,6 +565,7 @@ if (Q.title) {
   document.getElementById("pageTitle").textContent = Q.title;
 }
 
+/* ═══════════ DEBUG OVERLAY ═══════════ */
 if (Q.debug) {
   const _log = console.log.bind(console);
   const _warn = console.warn.bind(console);
@@ -592,12 +593,14 @@ if (Q.debug) {
   document.body.style.paddingBottom = "40vh";
 }
 
+/* ═══════════ SOURCE DETECTION ═══════════ */
 function detectSource() {
   if (Q.source === "tmdb" || Q.tmdbId) return "tmdb";
   if (Q.source === "moviebox" || Q.detailPath) return "moviebox";
   return "";
 }
 
+/* ═══════════ STATE ═══════════ */
 const state = {
   source: detectSource(),
   hero: {
@@ -614,6 +617,7 @@ const state = {
   bootError: null,
 };
 
+/* ═══════════ HELPERS ═══════════ */
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
@@ -734,7 +738,7 @@ function matchScore(norm, needle) {
   return 0;
 }
 
-/* ═══════════ HISTORY ═══════════ */
+/* ═══════════ WATCH HISTORY ═══════════ */
 function saveToHistory(entry) {
   try {
     const raw = localStorage.getItem(HISTORY_KEY);
@@ -947,7 +951,7 @@ function normalizeSeasons(rawSeasons, isSeries) {
   return out;
 }
 
-/* ═══════════ SEARCH: MovieBox (with debug + fallback) ═══════════ */
+/* ═══════════ SEARCH: MovieBox ═══════════ */
 async function searchMovieBox(title, isTV) {
   if (!title) return null;
   const cleaned = cleanForSearch(title);
@@ -978,11 +982,10 @@ async function tryMovieBoxQuery(query, isTV) {
 async function tryMovieBoxEndpoint(endpoint, query, isTV) {
   try {
     const fullUrl = BASE + endpoint;
-    const res = await fetch(PROXY + "/?url=" + encodeURIComponent(fullUrl) + "&referer=" + encodeURIComponent(BASE + "/"));
+    const res = await fetch(PROXY + "/proxy?url=" + encodeURIComponent(fullUrl) + "&referer=" + encodeURIComponent(BASE + "/"));
     if (!res.ok) return null;
     const html = await res.text();
 
-    // ── DEBUG ──
     console.log("[match] response length:", html.length);
     console.log("[match] has NUXT_DATA:", html.includes("__NUXT_DATA__"));
     console.log("[match] first 200 chars:", html.slice(0, 200));
@@ -1016,8 +1019,6 @@ async function tryMovieBoxEndpoint(endpoint, query, isTV) {
   }
   return null;
 }
-
-// ── HTML fallback: scrape links from search page ──
 function tryHtmlFallback(html, query, isTV) {
   try {
     const doc = new DOMParser().parseFromString(html, "text/html");
@@ -1058,7 +1059,7 @@ async function loadMovieBox(detailPath, subjectId) {
 
   try {
     const realUrl = BASE + "/moviesDetail/" + detailPath;
-    const res = await fetch(PROXY + "/?url=" + encodeURIComponent(realUrl) + "&referer=" + encodeURIComponent(BASE + "/"));
+    const res = await fetch(PROXY + "/proxy?url=" + encodeURIComponent(realUrl) + "&referer=" + encodeURIComponent(BASE + "/"));
     if (!res.ok) throw new Error("HTTP " + res.status);
     const html = await res.text();
     const resolved = extractNuxt3Payload(html);
