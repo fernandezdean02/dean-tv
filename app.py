@@ -1,28 +1,44 @@
+"""
+MovieBox proxy — FastAPI port of server.py for Wasmer Edge.
+
+Ports the working parts of the original server.py:
+  - Host whitelist
+  - Browser-fingerprint CDN headers
+  - Multi-strategy media retry (via httpx, no TLS spoofing)
+  - m3u8 rewriting
+  - direct=1 → 302 redirect
+  - Non-video detection → 502 with body preview
+  - HTML serving
+  - /health, /favicon.ico
+
+Drops:
+  - plugins (drive, hdhub) — dead ends
+  - curl_cffi (not supported on WASIX)
+  - ThreadingHTTPServer / signals / keepalive thread (not needed)
+"""
+
 import os
-import sys
-import json
 import re
-import importlib
-import time
-from urllib.parse import urlparse, parse_qs, unquote, urljoin, quote
+import json
+from urllib.parse import urlparse, unquote, urljoin, quote
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import (
-    HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse, Response,
+    HTMLResponse, RedirectResponse, StreamingResponse, Response,
 )
 
 # ────────────────────────────────────────────────────────────────────────────
 # App
 # ────────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Dean TV")
+app = FastAPI(title="Dean TV — MovieBox proxy")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_HTML = "index.html"
 CHUNK_SIZE = 262144
 
 # ────────────────────────────────────────────────────────────────────────────
-# Allowed hosts
+# Host whitelist (copied from server.py)
 # ────────────────────────────────────────────────────────────────────────────
 ALLOWED_HOSTS = (
     "officialmoviebox.com", ".officialmoviebox.com",
@@ -75,18 +91,10 @@ def _guess_content_type_from_path(path: str):
     return None
 
 
-def _is_allowed(host: str, provider_id: str | None = None) -> bool:
+def _is_allowed(host: str) -> bool:
     if not host:
         return False
     host = host.lower()
-    if provider_id:
-        prov = PROVIDERS.get(provider_id)
-        if not prov:
-            return False
-        for h in [prov.get("host", "")] + prov.get("cdn_hosts", []):
-            if h and (host == h or host.endswith("." + h)):
-                return True
-        return False
     for h in ALLOWED_HOSTS:
         if h.startswith("."):
             if host == h[1:] or host.endswith(h):
@@ -94,84 +102,11 @@ def _is_allowed(host: str, provider_id: str | None = None) -> bool:
         else:
             if host == h or host.endswith("." + h):
                 return True
-    for prov in PROVIDERS.values():
-        for h in [prov.get("host", "")] + prov.get("cdn_hosts", []):
-            if h and (host == h or host.endswith("." + h)):
-                return True
     return False
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Load providers.json
-# ────────────────────────────────────────────────────────────────────────────
-PROVIDERS_FILE = os.path.join(BASE_DIR, "providers.json")
-
-def _load_providers():
-    if not os.path.exists(PROVIDERS_FILE):
-        print(f"[providers] {PROVIDERS_FILE} not found — starting empty", flush=True)
-        return {}
-    try:
-        with open(PROVIDERS_FILE, "r", encoding="utf-8") as f:
-            src = json.load(f)
-    except Exception as e:
-        print(f"[providers] failed to load: {e}", flush=True)
-        return {}
-    out = {}
-    for pid, info in src.items():
-        url = (info.get("url") or "").strip()
-        try:
-            host = (urlparse(url).hostname or "").lower() if url else ""
-        except Exception:
-            host = ""
-        out[pid] = {
-            "id": pid,
-            "name": info.get("name") or pid,
-            "url": url,
-            "host": host,
-            "cdn_hosts": [h.lower() for h in (info.get("cdn_hosts") or []) if h],
-        }
-    print(f"[providers] loaded {len(out)} providers", flush=True)
-    return out
-
-
-PROVIDERS = _load_providers()
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Load provider plugins
-# ────────────────────────────────────────────────────────────────────────────
-PLUGIN_DIR = os.path.join(BASE_DIR, "providers")
-_PLUGINS: dict = {}
-
-def _load_plugins():
-    if not os.path.isdir(PLUGIN_DIR):
-        print(f"[plugins] {PLUGIN_DIR} not found", flush=True)
-        return
-    init_py = os.path.join(PLUGIN_DIR, "__init__.py")
-    if not os.path.exists(init_py):
-        with open(init_py, "w", encoding="utf-8") as f:
-            f.write('"""Provider plugins."""\n')
-    if BASE_DIR not in sys.path:
-        sys.path.insert(0, BASE_DIR)
-    for entry in sorted(os.listdir(PLUGIN_DIR)):
-        if not entry.endswith(".py") or entry.startswith("_"):
-            continue
-        modname = entry[:-3]
-        try:
-            mod = importlib.import_module(f"providers.{modname}")
-            cls = getattr(mod, "Provider", None)
-            if cls is not None and getattr(cls, "id", None):
-                _PLUGINS[cls.id] = cls
-                print(f"[plugins] loaded {modname} -> '{cls.id}'", flush=True)
-        except Exception as e:
-            print(f"[plugins] failed {modname}: {e}", flush=True)
-
-
-_load_plugins()
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# HTTP client + CDN headers
+# CDN headers + media retry
 # ────────────────────────────────────────────────────────────────────────────
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -221,10 +156,8 @@ def _is_good_media_response(r: httpx.Response) -> bool:
 
 async def _fetch_media_with_retry(target: str, referer: str, cookie: str | None, range_hdr: str | None):
     """
-    Try multiple header strategies until we get real video content back.
-    Returns (response, label) on success, (None, error_msg) on failure.
-    Note: httpx can't impersonate browser TLS fingerprints like curl_cffi,
-    so we rely on header/HTTP-version combos instead.
+    Multi-strategy retry. httpx can't spoof TLS fingerprints, so we try
+    different header combos instead of different browser impersonations.
     """
     strategies = [
         ({}, "default"),
@@ -243,7 +176,6 @@ async def _fetch_media_with_retry(target: str, referer: str, cookie: str | None,
                 follow_redirects=True,
                 timeout=httpx.Timeout(120.0, connect=15.0),
                 verify=False,
-                http2=False,
             )
             req = client.build_request("GET", target, headers=headers)
             r = await client.send(req, stream=True)
@@ -265,7 +197,7 @@ async def _fetch_media_with_retry(target: str, referer: str, cookie: str | None,
 # ────────────────────────────────────────────────────────────────────────────
 # m3u8 rewriting
 # ────────────────────────────────────────────────────────────────────────────
-def _rewrite_m3u8(content, base_url: str, referer: str, cookie: str | None = None, provider_id: str | None = None):
+def _rewrite_m3u8(content, base_url: str, referer: str, cookie: str | None = None):
     if isinstance(content, (bytes, bytearray)):
         content = content.decode("utf-8", "replace")
 
@@ -273,8 +205,6 @@ def _rewrite_m3u8(content, base_url: str, referer: str, cookie: str | None = Non
         q = "url=" + quote(abs_url, safe="") + "&referer=" + quote(referer, safe="")
         if cookie:
             q += "&cookie=" + quote(cookie, safe="")
-        if provider_id:
-            q += "&provider=" + quote(provider_id, safe="")
         return "/proxy?" + q
 
     out = []
@@ -299,7 +229,7 @@ def _rewrite_m3u8(content, base_url: str, referer: str, cookie: str | None = Non
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Routes — basic
+# HTML / health / favicon
 # ────────────────────────────────────────────────────────────────────────────
 @app.get("/favicon.ico")
 async def favicon():
@@ -331,75 +261,7 @@ async def serve_html(filename: str):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Routes — providers
-# ────────────────────────────────────────────────────────────────────────────
-@app.get("/providers")
-async def list_providers():
-    data = sorted(
-        (
-            {
-                "id": pid,
-                "name": info.get("name", pid),
-                "url": info.get("url", ""),
-                "has_plugin": pid in _PLUGINS,
-            }
-            for pid, info in PROVIDERS.items()
-        ),
-        key=lambda x: x["name"].lower(),
-    )
-    return JSONResponse(data)
-
-
-@app.get("/providers/{pid}")
-async def get_provider(pid: str):
-    prov = PROVIDERS.get(pid)
-    if not prov:
-        raise HTTPException(404, f"unknown provider: {pid}")
-    out = dict(prov)
-    out["has_plugin"] = pid in _PLUGINS
-    return JSONResponse(out)
-
-
-@app.get("/providers/{pid}/search")
-async def provider_search(pid: str, q: str = ""):
-    prov = PROVIDERS.get(pid)
-    if not prov:
-        raise HTTPException(404, f"unknown provider: {pid}")
-    cls = _PLUGINS.get(pid)
-    if cls is None:
-        raise HTTPException(501, f"no plugin for provider: {pid}")
-    try:
-        inst = cls(prov)
-        result = inst.search(q)
-        return JSONResponse(json.loads(json.dumps(result, default=str)))
-    except NotImplementedError as e:
-        raise HTTPException(501, f"not implemented: {e}")
-    except Exception as e:
-        print(f"[plugin] {pid}.search error: {e}", flush=True)
-        raise HTTPException(502, f"plugin error: {e}")
-
-
-@app.get("/providers/{pid}/streams")
-async def provider_streams(pid: str, url: str = ""):
-    prov = PROVIDERS.get(pid)
-    if not prov:
-        raise HTTPException(404, f"unknown provider: {pid}")
-    cls = _PLUGINS.get(pid)
-    if cls is None:
-        raise HTTPException(501, f"no plugin for provider: {pid}")
-    try:
-        inst = cls(prov)
-        result = inst.get_streams(url)
-        return JSONResponse(json.loads(json.dumps(result, default=str)))
-    except NotImplementedError as e:
-        raise HTTPException(501, f"not implemented: {e}")
-    except Exception as e:
-        print(f"[plugin] {pid}.streams error: {e}", flush=True)
-        raise HTTPException(502, f"plugin error: {e}")
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Routes — proxy
+# Proxy — the main MovieBox logic from server.py
 # ────────────────────────────────────────────────────────────────────────────
 @app.get("/proxy")
 async def proxy(request: Request):
@@ -410,7 +272,6 @@ async def proxy(request: Request):
     target = unquote(url)
     referer = unquote(request.query_params.get("referer", "https://officialmoviebox.com/"))
     cookie_param = request.query_params.get("cookie")
-    provider_id = request.query_params.get("provider")
     direct_flag = request.query_params.get("direct", "0") == "1"
 
     try:
@@ -418,11 +279,11 @@ async def proxy(request: Request):
     except Exception:
         host = ""
 
-    if not _is_allowed(host, provider_id=provider_id):
-        print(f"[proxy] BLOCK host={host} provider={provider_id} target={target}", flush=True)
+    if not _is_allowed(host):
+        print(f"[proxy] BLOCK host={host} target={target}", flush=True)
         raise HTTPException(403, f"host not allowed: {host}")
 
-    # Client-side bypass: 302 to CDN
+    # Client-side bypass
     if direct_flag:
         print(f"[proxy] DIRECT redirect host={host}", flush=True)
         return RedirectResponse(target, status_code=302)
@@ -434,6 +295,7 @@ async def proxy(request: Request):
     upstream = None
     client = None
 
+    # ═══ Media: multi-strategy retry ═══
     if is_media:
         upstream, client, strategy = await _fetch_media_with_retry(
             target, referer, cookie_param, rng
@@ -452,6 +314,7 @@ async def proxy(request: Request):
                 },
             )
     else:
+        # ═══ API / other: single attempt ═══
         if is_api:
             headers = {
                 "Accept": "application/json",
@@ -493,7 +356,7 @@ async def proxy(request: Request):
             print(f"[proxy] UPSTREAM FAIL target={target} error={e}", flush=True)
             raise HTTPException(502, f"upstream error: {e}")
 
-    # ── m3u8 rewrite ──
+    # ═══ m3u8 rewrite ═══
     manifest_ct = (upstream.headers.get("Content-Type") or "").split(";")[0].strip().lower()
     is_manifest = (
         urlparse(target).path.lower().endswith(".m3u8")
@@ -508,7 +371,7 @@ async def proxy(request: Request):
             raise HTTPException(502, f"manifest read failed: {e}")
         await upstream.aclose()
         await client.aclose()
-        rewritten = _rewrite_m3u8(raw, target, referer, cookie_param, provider_id)
+        rewritten = _rewrite_m3u8(raw, target, referer, cookie_param)
         return Response(
             content=rewritten.encode("utf-8"),
             status_code=upstream.status_code,
@@ -519,7 +382,7 @@ async def proxy(request: Request):
             },
         )
 
-    # ── non-video safety net ──
+    # ═══ Non-video safety net ═══
     media_ct = _guess_content_type_from_path(target)
     if media_ct:
         upstream_ct = (upstream.headers.get("Content-Type") or "").lower()
@@ -558,7 +421,7 @@ async def proxy(request: Request):
                 },
             )
 
-    # ── stream response ──
+    # ═══ Stream response ═══
     out_headers = {"Access-Control-Allow-Origin": "*"}
     cdn_ct = (upstream.headers.get("Content-Type") or "").split(";")[0].strip().lower()
     if cdn_ct.startswith("video/") or cdn_ct == "application/octet-stream":
@@ -596,7 +459,7 @@ async def proxy(request: Request):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Local dev entrypoint
+# Local dev
 # ────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
